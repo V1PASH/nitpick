@@ -30,9 +30,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-timeout>=2.3"]
-# Server-side VAD. webrtcvad needs a C compiler; the Silero backend needs
-# onnxruntime. Both are optional — without them the browser's own speaking
-# detection drives turn boundaries.
+# Server-side VAD. The webrtcvad extra needs a C compiler to build; the
+# Silero backend needs onnxruntime. Both are optional — the default
+# 'energy' backend has no dependencies, and without any of them the
+# browser's own speaking detection drives turn boundaries.
+#
+# Note: nitpick calls the webrtcvad C extension directly rather than
+# importing the wrapper package, so setuptools is not needed at runtime.
 webrtcvad = ["webrtcvad>=2.0.10"]
 onnx = ["onnxruntime>=1.17"]
 # The agent as a native WebRTC peer instead of relaying PCM over the

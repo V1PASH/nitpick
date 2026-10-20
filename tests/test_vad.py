@@ -98,6 +98,69 @@ def test_energy_vad_detects_speech_above_the_noise_floor():
 
 
 # ---------------------------------------------------------------------------
+# The WebRTC VAD backend
+# ---------------------------------------------------------------------------
+
+
+def test_webrtc_vad_detects_speech():
+    """The backend must work without pkg_resources.
+
+    The ``webrtcvad`` wrapper package imports ``pkg_resources`` for a
+    cosmetic version string, and recent setuptools releases no longer
+    ship it — which Python 3.12+ virtualenvs do not install by default.
+    nitpick calls the C extension directly to avoid that.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("_webrtcvad") is None:
+        pytest.skip("the webrtcvad C extension is not installed")
+
+    from nitpick.vad import WebRtcVad
+
+    vad = WebRtcVad(16_000)
+
+    # The WebRTC VAD needs a moment to settle, so feed a few frames.
+    for _ in range(3):
+        vad.is_speech(silence(320))
+    assert vad.is_speech(silence(320)) == 0.0
+
+    for _ in range(3):
+        assert vad.is_speech(speech(320, amplitude=12000)) == 1.0
+
+
+def test_webrtc_vad_rejects_an_unsupported_sample_rate():
+    import importlib.util
+
+    if importlib.util.find_spec("_webrtcvad") is None:
+        pytest.skip("the webrtcvad C extension is not installed")
+
+    from nitpick.vad import WebRtcVad
+
+    with pytest.raises(ValueError):
+        WebRtcVad(44_100)
+
+
+def test_webrtc_vad_needs_no_pkg_resources():
+    """Importing nitpick's backend must not pull in pkg_resources."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys;"
+        "import nitpick.vad.backends as b;"
+        "b.WebRtcVad(16000);"
+        "print('pkg_resources' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False", (
+        "the backend must not import pkg_resources"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The processor
 # ---------------------------------------------------------------------------
 

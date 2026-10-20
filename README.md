@@ -89,7 +89,7 @@ export SARVAM_API_KEY=...         # optional: Sarvam STT (Indian languages)
 | Extra | Adds | Why |
 |---|---|---|
 | `pip install nitpick[onnx]` | Silero VAD | A neural VAD that handles noisy rooms |
-| `pip install nitpick[webrtcvad]` | WebRTC VAD | Google's model; needs a C compiler and `setuptools` |
+| `pip install nitpick[webrtcvad]` | WebRTC VAD | Google's model; needs a C compiler to build |
 | `pip install nitpick[webrtc]` | `aiortc` | The agent as a native WebRTC peer |
 | `pip install nitpick[all]` | all of the above | |
 

@@ -114,48 +114,94 @@ def _rms(window: bytes) -> float:
 
 
 class WebRtcVad:
-    """The default backend, powered by Google's WebRTC VAD.
+    """The WebRTC VAD backend — Google's model, packaged as a C extension.
 
-    Small, fast and dependency-light. Needs no model file, so it works
-    offline the moment it is installed.
+    Install with ``pip install nitpick[webrtcvad]``. Building it needs a C
+    compiler.
 
-    Install with ``pip install nitpick[webrtcvad]``.
+    The ``webrtcvad`` wrapper package is not used directly: it imports
+    ``pkg_resources`` for a cosmetic ``__version__`` line, and recent
+    setuptools releases no longer ship ``pkg_resources`` — which Python
+    3.12+ virtualenvs do not install by default. The C extension underneath
+    it (``_webrtcvad``) has no such dependency, so nitpick calls that
+    directly and only falls back to the wrapper if the extension is
+    missing.
     """
 
     def __init__(self, sample_rate: int = 16_000, aggressiveness: int = 2) -> None:
-        import importlib.util
-
-        if importlib.util.find_spec("webrtcvad") is None:
-            raise RuntimeError(
-                "The webrtcvad backend needs the 'webrtcvad' package. "
-                "Install it with: pip install nitpick[webrtcvad]"
-            )
-        try:
-            import webrtcvad
-        except ImportError as exc:
-            # webrtcvad imports pkg_resources, which setuptools removed in
-            # recent versions — and which Python 3.12+ venvs no longer
-            # install by default.
-            raise RuntimeError(
-                "The webrtcvad backend could not be imported "
-                f"({exc}). It needs 'setuptools' installed for pkg_resources, "
-                "or use the default 'energy' backend instead."
-            ) from exc
-
         if sample_rate not in (8_000, 16_000, 32_000, 48_000):
             raise ValueError(f"webrtcvad does not support {sample_rate} Hz")
 
+        if not 0 <= aggressiveness <= 3:
+            raise ValueError("aggressiveness must be between 0 and 3")
+
         self.sample_rate = sample_rate
-        self._vad = webrtcvad.Vad(aggressiveness)
+        self._backend = _create_webrtc_vad(aggressiveness)
 
     def is_speech(self, window: bytes) -> float:
         """Return 1.0 when the window contains speech, else 0.0."""
         try:
-            is_speech = self._vad.is_speech(window, self.sample_rate)
+            is_speech = self._backend.is_speech(window, self.sample_rate)
         except Exception as exc:  # noqa: BLE001 - a bad window must not kill the stream
             log.debug("webrtcvad rejected a window: %s", exc)
             return 0.0
         return 1.0 if is_speech else 0.0
+
+
+def _create_webrtc_vad(aggressiveness: int) -> Any:
+    """Build a WebRTC VAD instance, preferring the bare C extension."""
+    try:
+        import _webrtcvad
+    except ImportError:
+        _webrtcvad = None  # type: ignore[assignment]
+
+    if _webrtcvad is not None:
+        return _NativeWebRtcVad(_webrtcvad, aggressiveness)
+
+    # The extension is missing — fall back to the wrapper package, which
+    # needs pkg_resources.
+    import importlib.util
+
+    if importlib.util.find_spec("webrtcvad") is None:
+        raise RuntimeError(
+            "The webrtcvad backend needs the 'webrtcvad' package. "
+            "Install it with: pip install nitpick[webrtcvad]"
+        )
+    try:
+        import webrtcvad
+    except ImportError as exc:
+        raise RuntimeError(
+            "The webrtcvad backend could not be imported "
+            f"({exc}). Install 'setuptools' for pkg_resources, or use the "
+            "default 'energy' backend instead."
+        ) from exc
+    return _WrapperWebRtcVad(webrtcvad.Vad(aggressiveness))
+
+
+class _NativeWebRtcVad:
+    """Drives the ``_webrtcvad`` C extension directly."""
+
+    def __init__(self, extension: Any, aggressiveness: int) -> None:
+        self._extension = extension
+        self._vad = extension.create()
+        extension.init(self._vad)
+        extension.set_mode(self._vad, aggressiveness)
+
+    def is_speech(self, window: bytes, sample_rate: int) -> bool:
+        frames = len(window) // 2
+        if frames == 0:
+            return False
+        return bool(self._extension.process(self._vad, sample_rate, window, frames))
+
+
+class _WrapperWebRtcVad:
+    """Drives the ``webrtcvad`` wrapper package."""
+
+    def __init__(self, vad: Any) -> None:
+        self._vad = vad
+
+    def is_speech(self, window: bytes, sample_rate: int) -> bool:
+        return bool(self._vad.is_speech(window, sample_rate))
 
 
 class SileroVad:

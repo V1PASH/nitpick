@@ -16,6 +16,14 @@ Then open http://localhost:8000 and talk to it.
 from __future__ import annotations
 
 from .agent import Agent, AgentConfig, ToolDefinition, tool
+from .billing import (
+    BillingCollector,
+    BillingEvent,
+    LogBillingStorage,
+    MemoryBillingStorage,
+    SessionBilling,
+    TranscriptRole,
+)
 from .context import LLMContext, Message, ToolSchema, shared_context
 from .frames import (
     AudioChunk,
@@ -28,6 +36,7 @@ from .frames import (
 )
 from .pipeline import FinishReason, Pipeline, PipelineParams, PipelineTask
 from .processors.assistant_aggregator import AssistantAggregator
+from .processors.interruption import InterruptionHandler
 from .processors.user_aggregator import UserAggregator
 from .rooms import (
     Participant,
@@ -37,34 +46,55 @@ from .rooms import (
     RoomEventType,
     RoomManager,
 )
+from .sdk import RoomClient, SDKError
 from .services.llm import LLMConfig, LLMService, LLMTool
 from .services.stt import (
     DeepgramSttProvider,
     OpenAISttProvider,
+    SarvamSttProvider,
     SttEvent,
     SttProvider,
     SttService,
 )
 from .services.tts import TTSConfig, TTSService
-from .transport import ChannelTransport, RoomTransport, TransportParams
+from .transport import (
+    ChannelTransport,
+    RoomTransport,
+    SpeakingGate,
+    TransportParams,
+)
+from .vad import (
+    EnergyVad,
+    SileroVad,
+    VadParams,
+    VadProcessor,
+    VadState,
+    WebRtcVad,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
     "AgentConfig",
     "AssistantAggregator",
     "AudioChunk",
+    "BillingCollector",
+    "BillingEvent",
     "ChannelTransport",
     "DeepgramSttProvider",
+    "EnergyVad",
     "FinishReason",
     "Frame",
     "FrameKind",
     "FrameProcessor",
+    "InterruptionHandler",
     "LLMConfig",
     "LLMContext",
     "LLMService",
     "LLMTool",
+    "LogBillingStorage",
+    "MemoryBillingStorage",
     "Message",
     "OpenAISttProvider",
     "Participant",
@@ -73,10 +103,16 @@ __all__ = [
     "PipelineParams",
     "PipelineTask",
     "Room",
+    "RoomClient",
     "RoomControlModule",
     "RoomEventType",
     "RoomManager",
     "RoomTransport",
+    "SDKError",
+    "SarvamSttProvider",
+    "SessionBilling",
+    "SileroVad",
+    "SpeakingGate",
     "SttEvent",
     "SttProvider",
     "SttService",
@@ -84,11 +120,16 @@ __all__ = [
     "TTSService",
     "ToolDefinition",
     "ToolSchema",
+    "TranscriptRole",
     "Transcription",
     "TransportParams",
     "UserAggregator",
+    "VadParams",
+    "VadProcessor",
+    "VadState",
     "VadStarted",
     "VadStopped",
+    "WebRtcVad",
     "__version__",
     "shared_context",
     "tool",

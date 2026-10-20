@@ -15,14 +15,14 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from ...context import LLMContext, ToolSchema
 from ...frames import (
     DOWNSTREAM,
     Frame,
-    FrameHandler,
     FrameKind,
     FrameProcessor,
     frame_function_call_end,
@@ -35,6 +35,9 @@ from ...frames import (
 )
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ...billing import BillingCollector
 
 ToolHandler = Callable[[str, str], Awaitable[str] | str]
 
@@ -84,11 +87,15 @@ class LLMService(FrameProcessor):
         config: LLMConfig | None = None,
         *,
         name: str = "LLMService",
+        billing: "BillingCollector | None" = None,
     ) -> None:
         super().__init__(name, _LLMHandler(self))
         self.context = context
         self.config = config or LLMConfig()
         self._tools: dict[str, LLMTool] = {}
+        self._billing = billing
+        self._turn_task: asyncio.Task | None = None
+        self._interrupted = False
 
     # ------------------------------------------------------------------
     # Tools
@@ -113,10 +120,18 @@ class LLMService(FrameProcessor):
     # ------------------------------------------------------------------
 
     async def _run_turn(self) -> None:
+        """Run one conversational turn, including any tool rounds."""
+        self._interrupted = False
         await self.push_frame(frame_llm_full_response_start(), DOWNSTREAM)
 
         for round_index in range(self.config.max_tool_rounds + 1):
+            if self._interrupted:
+                break
+
             tool_calls = await self._stream_once()
+
+            if self._interrupted:
+                break
 
             if not tool_calls:
                 break
@@ -134,6 +149,11 @@ class LLMService(FrameProcessor):
 
         await self.push_frame(frame_llm_full_response_end(), DOWNSTREAM)
 
+    async def interrupt(self) -> None:
+        """Abort the turn in flight. The user started speaking."""
+        self._interrupted = True
+        log.info("LLM turn interrupted")
+
     async def _stream_once(self) -> list[dict[str, Any]]:
         """One model invocation. Returns any tool calls it requested."""
         messages = self.context.snapshot()
@@ -144,6 +164,8 @@ class LLMService(FrameProcessor):
             "messages": messages,
             "stream": True,
             "temperature": self.config.temperature,
+            # Ask for token counts on the final chunk so usage can be billed.
+            "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
@@ -158,6 +180,8 @@ class LLMService(FrameProcessor):
 
         tool_calls: list[dict[str, Any]] = []
         content_parts: list[str] = []
+        usage: dict[str, Any] = {}
+        started = time.monotonic()
 
         import httpx
 
@@ -165,6 +189,8 @@ class LLMService(FrameProcessor):
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
+                    if self._interrupted:
+                        break
                     if not line or not line.startswith("data:"):
                         continue
                     body = line[5:].strip()
@@ -175,6 +201,10 @@ class LLMService(FrameProcessor):
                     except json.JSONDecodeError:
                         continue
 
+                    chunk_usage = chunk.get("usage")
+                    if isinstance(chunk_usage, dict):
+                        usage = chunk_usage
+
                     for choice in chunk.get("choices", []):
                         delta = choice.get("delta") or {}
                         text = delta.get("content")
@@ -183,6 +213,16 @@ class LLMService(FrameProcessor):
                             await self.push_frame(frame_llm_text(text), DOWNSTREAM)
                         for call in delta.get("tool_calls") or []:
                             tool_calls.append(self._merge_tool_call(tool_calls, call))
+
+        latency_ms = (time.monotonic() - started) * 1000.0
+
+        if self._billing is not None:
+            self._billing.record_llm_usage(
+                model=self.config.model,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                latency_ms=latency_ms,
+            )
 
         if content_parts and tool_calls:
             # A tool round needs the assistant's own message in the context so
@@ -284,5 +324,9 @@ class _LLMHandler:
         service = self._service
         if frame.kind is FrameKind.LLM_CONTEXT:
             await service._run_turn()
+            return
+        if frame.kind is FrameKind.INTERRUPTION:
+            await service.interrupt()
+            await processor.push_frame(frame, direction)
             return
         await processor.push_frame(frame, direction)

@@ -23,14 +23,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .billing import SessionBilling
 from .context import LLMContext, ToolSchema
 from .frames import FrameProcessor
 from .pipeline import PipelineParams, PipelineTask
 from .processors.assistant_aggregator import AssistantAggregator
+from .processors.interruption import InterruptionHandler
 from .processors.user_aggregator import UserAggregator
 from .rooms import RoomControlModule, RoomManager
 from .rooms.model import Participant
@@ -38,6 +40,7 @@ from .services.llm import LLMConfig, LLMService, LLMTool
 from .services.stt import (
     DeepgramSttProvider,
     OpenAISttProvider,
+    SarvamSttProvider,
     SttProvider,
     SttService,
 )
@@ -123,6 +126,14 @@ class AgentConfig:
     language: str | None = None
     input_sample_rate: int = 16_000
     output_sample_rate: int = 24_000
+    #: Server-side VAD backend: ``"energy"`` (default, no dependencies),
+    #: ``"webrtc"``, ``"silero"``, or ``None`` to rely on the browser's own
+    #: speaking detection.
+    vad: str | None = "energy"
+    #: Whether the user can interrupt the bot mid-sentence.
+    allow_interruptions: bool = True
+    #: Whether to collect usage and transcript events for this session.
+    billing: bool = False
 
 
 class Agent:
@@ -156,9 +167,14 @@ class Agent:
         tools: list[ToolDefinition] | None = None,
         input_sample_rate: int = 16_000,
         output_sample_rate: int = 24_000,
+        vad: str | None = "energy",
+        allow_interruptions: bool = True,
+        billing: bool = False,
+        session_id: str | None = None,
         stt_provider: SttProvider | None = None,
         llm_service: LLMService | None = None,
         tts_service: TTSService | None = None,
+        vad_backend: object | None = None,
     ) -> None:
         self.config = AgentConfig(
             name=name,
@@ -169,16 +185,29 @@ class Agent:
             language=language,
             input_sample_rate=input_sample_rate,
             output_sample_rate=output_sample_rate,
+            vad=vad,
+            allow_interruptions=allow_interruptions,
+            billing=billing,
         )
         self.tools = list(tools or [])
         self.context = LLMContext(self.config.prompt)
         self.manager = RoomManager()
         self.control = RoomControlModule(self.manager)
+        self.session_id = session_id or f"s-{uuid.uuid4().hex[:12]}"
+
         # Service overrides — used by tests and by anyone who wants to plug
         # in a provider nitpick does not ship.
         self._stt_provider = stt_provider
         self._llm_service = llm_service
         self._tts_service = tts_service
+        self._vad_backend = vad_backend
+
+        # Billing.
+        self.billing: SessionBilling | None = None
+        if billing:
+            self.billing = SessionBilling(self.session_id)
+            self.billing.start()
+
         self._task: PipelineTask | None = None
         self._transport: RoomTransport | None = None
         self._participant: Participant | None = None
@@ -206,6 +235,12 @@ class Agent:
                 sample_rate=self.config.input_sample_rate,
                 **options,
             )
+        elif provider_name == "sarvam":
+            provider = SarvamSttProvider(
+                language=self.config.language,
+                sample_rate=self.config.input_sample_rate,
+                **options,
+            )
         elif provider_name == "openai":
             provider = OpenAISttProvider(
                 language=self.config.language,
@@ -214,9 +249,58 @@ class Agent:
             )
         else:
             raise ValueError(
-                f"Unknown STT provider {provider_name!r}. Use 'openai' or 'deepgram'."
+                f"Unknown STT provider {provider_name!r}. "
+                "Use 'openai', 'deepgram' or 'sarvam'."
             )
         return SttService(provider)
+
+    def _build_vad(self, gate: object | None, on_speaking: Any = None) -> FrameProcessor | None:
+        """Build the server-side VAD processor, if enabled.
+
+        If the backend is not installed the agent still works — the browser
+        reports its own speaking edges, which is enough for turn detection.
+        Server-side VAD is an improvement, not a requirement.
+        """
+        if self._vad_backend is not None:
+            backend = self._vad_backend
+        elif self.config.vad == "energy":
+            from .vad import EnergyVad
+
+            backend = EnergyVad(self.config.input_sample_rate)
+        elif self.config.vad == "webrtc":
+            from .vad import WebRtcVad
+
+            try:
+                backend = WebRtcVad(self.config.input_sample_rate)
+            except (RuntimeError, ValueError) as exc:
+                log.warning(
+                    "Server-side VAD unavailable (%s) — falling back to the "
+                    "browser's speaking detection",
+                    exc,
+                )
+                return None
+        elif self.config.vad == "silero":
+            from .vad import SileroVad
+
+            try:
+                backend = SileroVad(self.config.input_sample_rate)
+            except (RuntimeError, ValueError, FileNotFoundError) as exc:
+                log.warning(
+                    "Server-side VAD unavailable (%s) — falling back to the "
+                    "browser's speaking detection",
+                    exc,
+                )
+                return None
+        elif self.config.vad is None:
+            return None
+        else:
+            raise ValueError(
+                f"Unknown VAD backend {self.config.vad!r}. Use 'webrtc', 'silero' or None."
+            )
+
+        from .vad import VadProcessor
+
+        return VadProcessor(backend, speaking_gate=gate, on_speaking=on_speaking)
 
     def _build_llm(self) -> LLMService:
         if self._llm_service is not None:
@@ -227,7 +311,7 @@ class Agent:
         if provider_name != "openai":
             raise ValueError(f"Unknown LLM provider {provider_name!r}. Use 'openai'.")
         config = LLMConfig(model=model or "gpt-4o-mini")
-        service = LLMService(self.context, config)
+        service = LLMService(self.context, config, billing=self.billing)
         for definition in self.tools:
             service.add_tool(definition.to_tool())
         return service
@@ -244,7 +328,7 @@ class Agent:
             voice=voice or "alloy",
             sample_rate=self.config.output_sample_rate,
         )
-        return TTSService(config)
+        return TTSService(config, billing=self.billing)
 
     # ------------------------------------------------------------------
     # Pipeline
@@ -276,20 +360,31 @@ class Agent:
         llm = self._build_llm()
         assistant_agg = AssistantAggregator(self.context)
         tts = self._build_tts()
+        vad = self._build_vad(transport.gate, transport.publish_user_speaking)
 
-        processors: list[FrameProcessor] = [
-            transport.input(),
-            stt,
-            user_agg,
-            llm,
-            assistant_agg,
-            tts,
-            transport.output(),
-        ]
+        processors: list[FrameProcessor] = [transport.input()]
+        if vad is not None:
+            processors.append(vad)
+        processors.extend(
+            [
+                stt,
+                user_agg,
+                llm,
+                assistant_agg,
+                tts,
+                # The interruption handler sits after the TTS so it sees both
+                # the bot-speaking signals and the user's turn starts.
+                InterruptionHandler(enabled=self.config.allow_interruptions),
+                transport.output(),
+            ]
+        )
 
         task = PipelineTask(
             processors,
-            PipelineParams(allow_interruptions=True, metadata={"agent": self.config.name}),
+            PipelineParams(
+                allow_interruptions=self.config.allow_interruptions,
+                metadata={"agent": self.config.name, "session_id": self.session_id},
+            ),
         )
         self._task = task
         return task
@@ -339,7 +434,11 @@ class Agent:
     def _server_with_manager(self) -> Any:
         from .signaling.server import SignalingServer
 
-        server = SignalingServer(self.manager, control=self.control)
+        server = SignalingServer(
+            self.manager,
+            control=self.control,
+            audio_output_sample_rate=self.config.output_sample_rate,
+        )
         return server
 
     def run(

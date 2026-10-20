@@ -287,22 +287,16 @@ class FrameProcessor:
     async def push_frame(self, frame: Frame, direction: str = DOWNSTREAM) -> None:
         """Push a frame to the next (or previous) processor.
 
-        If this processor has not received its ``START`` frame yet the frame
-        is **queued** rather than dropped. The input lane delivers system
-        frames first, so ``START`` is always processed before anything that
-        was queued ahead of it — no audio is lost in the window between a
-        processor being created and the pipeline booting.
-        """
-        if not self._started:
-            if not self._direct:
-                priority = 0 if frame.is_system else 1
-                self._input_q.put_nowait((priority, next(Sequence), frame, direction))
-                return
-            log.warning(
-                "%s tried to push %s before the pipeline started", self.name, frame.kind
-            )
-            return
+        The frame is handed to the neighbour's *queue*, so if the neighbour
+        has not booted yet the frame simply waits there. The ``START`` frame
+        is the first thing that flows through a pipeline, so anything queued
+        behind it is delivered in order once the pipeline is up.
 
+        Note that this deliberately does **not** re-queue into this
+        processor's own input queue when it is not started: the input loop
+        would pick the frame up, call the handler, the handler would push
+        the frame again, and the two would spin forever.
+        """
         if direction == DOWNSTREAM:
             target = self._next
         else:

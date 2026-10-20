@@ -21,7 +21,7 @@ import logging
 import time
 import uuid
 from enum import Enum
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from .model import Participant, ParticipantRole, ParticipantState, Room
 

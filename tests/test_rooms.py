@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import pytest
 
-from nitpick.rooms import RoomControlModule, RoomEventType, RoomManager
-from nitpick.rooms.model import Participant, ParticipantRole
+from nitpick.rooms import RoomControlModule, RoomManager
 from nitpick.signaling.server import SignalingServer
 
 
@@ -27,7 +25,7 @@ class FakeWebSocket:
 def test_room_capacity_is_enforced():
     manager = RoomManager()
     control = RoomControlModule(manager)
-    room = control.create_room("demo", max_participants=2)
+    control.create_room("demo", max_participants=2)
 
     first = manager.register_participant(None, "a")
     second = manager.register_participant(None, "b")

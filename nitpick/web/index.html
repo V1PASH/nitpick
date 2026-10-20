@@ -107,6 +107,8 @@
   let speaking = false;
   let silenceSince = 0;
   let lastSend = 0;
+  let outputRate = 24000;        // the agent's output sample rate
+  const activePlayback = new Set(); // audio sources we can still stop
   const peers = new Map();   // participant_id -> RTCPeerConnection
   const queuedIce = new Map();
 
@@ -201,6 +203,9 @@
     switch (msg.type) {
       case "connected":
         selfId = msg.participant_id;
+        if (msg.audio && msg.audio.output_sample_rate) {
+          outputRate = msg.audio.output_sample_rate;
+        }
         startMicrophone();
         break;
 
@@ -214,6 +219,10 @@
 
       case "room_audio":
         playAgentAudio(msg.audio_base64);
+        break;
+
+      case "room_interrupt":
+        stopAgentAudio();
         break;
 
       case "webrtc_offer":
@@ -353,12 +362,22 @@
       samples[i] = view.getInt16(i * 2, true) / 32768;
     }
 
-    const buffer = playbackCtx.createBuffer(1, samples.length, 24000);
+    const buffer = playbackCtx.createBuffer(1, samples.length, outputRate);
     buffer.copyToChannel(samples, 0);
     const source = playbackCtx.createBufferSource();
     source.buffer = buffer;
     source.connect(playbackCtx.destination);
     source.start();
+    activePlayback.add(source);
+    source.onended = () => activePlayback.delete(source);
+  }
+
+  function stopAgentAudio() {
+    // The user interrupted us — drop everything that is still queued.
+    for (const source of activePlayback) {
+      try { source.stop(); } catch (_) { /* already stopped */ }
+    }
+    activePlayback.clear();
   }
 
   // --------------------------------------------------------------- WebRTC

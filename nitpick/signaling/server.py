@@ -44,8 +44,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from ..rooms import RoomControlModule, RoomEventType, RoomManager
-from ..rooms.model import Participant
+from ..rooms import RoomControlModule, RoomManager
 
 log = logging.getLogger(__name__)
 
@@ -116,11 +115,15 @@ class SignalingServer:
         manager: RoomManager | None = None,
         *,
         control: RoomControlModule | None = None,
+        audio_output_sample_rate: int = 24_000,
     ) -> None:
         self.manager = manager or RoomManager()
         self.control = control or RoomControlModule(self.manager)
         self.config = SignalingConfig()
         self.control.max_participants_limit = self.config.max_room_participants
+        #: The sample rate of the audio the agent publishes, so the browser
+        #: can play it without guessing.
+        self.audio_output_sample_rate = audio_output_sample_rate
 
     # ------------------------------------------------------------------
     # Message handling
@@ -495,6 +498,7 @@ def create_app(server: SignalingServer | None = None) -> Any:
                 "type": "connected",
                 "participant_id": participant.participant_id,
                 "stt": {"provider": "pcm", "transport": "audio_pcm"},
+                "audio": {"output_sample_rate": signaling.audio_output_sample_rate},
             }
         )
         try:

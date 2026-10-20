@@ -20,7 +20,6 @@ from ..frames import (
     DOWNSTREAM,
     UPSTREAM,
     Frame,
-    FrameHandler,
     FrameKind,
     FrameProcessor,
     StartPayload,

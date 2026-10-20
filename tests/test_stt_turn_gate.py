@@ -10,12 +10,10 @@ import asyncio
 import pytest
 
 from nitpick.frames import (
-    DOWNSTREAM,
     Frame,
     FrameKind,
     FrameProcessor,
     Transcription,
-    frame_transcription,
     frame_vad_stopped,
 )
 from nitpick.pipeline import PipelineParams, PipelineTask

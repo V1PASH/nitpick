@@ -16,7 +16,6 @@ from ..context import LLMContext
 from ..frames import (
     DOWNSTREAM,
     Frame,
-    FrameHandler,
     FrameKind,
     FrameProcessor,
     Transcription,

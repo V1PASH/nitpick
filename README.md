@@ -73,15 +73,28 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Python 3.10+. Runtime dependencies are `fastapi`, `uvicorn`, `websockets` and
-`httpx`.
+Python 3.10+. The core install pulls in `fastapi`, `uvicorn`, `websockets`,
+`httpx` and `numpy` — nothing else, and no model downloads.
 
 Set the keys for the services you use:
 
 ```bash
 export OPENAI_API_KEY=sk-...      # STT, LLM and TTS
 export DEEPGRAM_API_KEY=...       # optional: streaming STT
+export SARVAM_API_KEY=...         # optional: Sarvam STT (Indian languages)
 ```
+
+### Optional extras
+
+| Extra | Adds | Why |
+|---|---|---|
+| `pip install nitpick[onnx]` | Silero VAD | A neural VAD that handles noisy rooms |
+| `pip install nitpick[webrtcvad]` | WebRTC VAD | Google's model; needs a C compiler and `setuptools` |
+| `pip install nitpick[webrtc]` | `aiortc` | The agent as a native WebRTC peer |
+| `pip install nitpick[all]` | all of the above | |
+
+The default VAD backend is `energy` — pure Python, no dependencies, no model
+file. It works straight after `pip install`.
 
 ---
 
@@ -105,6 +118,18 @@ nitpick version
 The agent serves a browser client at `/`, a health check at `/health`, and the
 signaling socket at `/ws`.
 
+### From your own code — the SDK
+
+```python
+from nitpick import RoomClient
+
+async with RoomClient("ws://localhost:8000/ws", name="My App") as client:
+    await client.join_room("demo")
+    await client.publish_pcm(pcm, sample_rate=16000)
+    async for message in client.messages():
+        ...
+```
+
 ---
 
 ## Architecture
@@ -112,6 +137,8 @@ signaling socket at `/ws`.
 ```
                       ┌──────────── PipelineTask ────────────┐
   browser  ──ws──►   │  RoomTransport.input                  │
+                      │        ↓                              │
+                      │  VadProcessor      ← turn boundaries  │
                       │        ↓                              │
                       │  SttService      ← turn gate          │
                       │        ↓                              │
@@ -123,6 +150,8 @@ signaling socket at `/ws`.
                       │        ↓                              │
                       │  TTSService      ← sentence buffering  │
                       │        ↓                              │
+                      │  InterruptionHandler ← barge-in        │
+                      │        ↓                              │
                       │  RoomTransport.output                 │
                       └───────────────────────────────────────┘
 ```
@@ -133,14 +162,76 @@ signaling socket at `/ws`.
 |---|---|
 | `nitpick.frames` | `Frame`, `FrameKind`, `FrameProcessor`, the two-lane queues |
 | `nitpick.pipeline` | `Pipeline`, `PipelineTask`, `PipelineParams` |
+| `nitpick.vad` | `StateMachine`, the `Energy`/`WebRtc`/`Silero` backends, `VadProcessor` |
 | `nitpick.rooms` | `Room`, `Participant`, `RoomManager`, `RoomControlModule` |
 | `nitpick.signaling` | The FastAPI signaling server and the WebSocket protocol |
-| `nitpick.transport` | `RoomTransport` (agent side), `ChannelTransport` (testing) |
-| `nitpick.services.stt` | `SttProvider` protocol, `SttService`, OpenAI + Deepgram |
+| `nitpick.transport` | `RoomTransport`, `ChannelTransport`, `WebRtcTransport` |
+| `nitpick.services.stt` | `SttProvider` protocol, `SttService`, OpenAI + Deepgram + Sarvam |
 | `nitpick.services.llm` | `LLMService` — streaming, tool calls, tool loop |
 | `nitpick.services.tts` | `TTSService` — sentence buffering, synthesis |
-| `nitpick.processors` | The user and assistant aggregators |
+| `nitpick.processors` | The user, assistant and interruption processors |
+| `nitpick.billing` | Per-session usage and transcript events |
+| `nitpick.sdk` | `RoomClient` — drive a room from your own code |
 | `nitpick.agent` | The `Agent` facade — the API you actually use |
+
+---
+
+## Turn detection
+
+The VAD is a four-state machine — `QUIET → STARTING → SPEAKING → STOPPING` —
+that debounces both edges, so a single cough does not open a turn and a
+pause between words does not close one.
+
+Three backends behind one API:
+
+| Backend | Install | Notes |
+|---|---|---|
+| `energy` *(default)* | — | Pure Python, adaptive noise floor. No dependencies. |
+| `webrtc` | `nitpick[webrtcvad]` | Google's model. Needs a C compiler. |
+| `silero` | `nitpick[onnx]` | Neural. Best in noisy rooms; the model is downloaded once. |
+
+```python
+agent = Agent(vad="silero")     # or "energy", "webrtc", or None
+```
+
+**Client and server VAD coordination.** The browser reports its own speaking
+edges, and the server has its own VAD. A shared `SpeakingGate` ensures
+exactly one turn boundary per utterance — whichever side detects speech
+first wins, and the other becomes a no-op.
+
+---
+
+## Barge-in
+
+When the user starts speaking while the bot is still talking, the bot stops.
+The `InterruptionHandler` watches for that, broadcasts an interruption, and:
+
+* the LLM service aborts its in-flight request,
+* the TTS service drops its buffer,
+* the room gets a `room_interrupt` message so the browser stops playback.
+
+```python
+agent = Agent(allow_interruptions=True)   # the default
+```
+
+---
+
+## Usage tracking
+
+`SessionBilling` records what a session consumed — LLM tokens, TTS
+characters, STT duration, and the full transcript.
+
+```python
+from nitpick import LogBillingStorage, SessionBilling
+
+billing = SessionBilling("session-42")
+billing.attach(LogBillingStorage("usage.jsonl"))
+billing.start()
+```
+
+Recording is a single `put_nowait` onto an unbounded queue drained by a
+background task, so it never blocks and never drops. Cost tracking costs
+the audio path nothing.
 
 ---
 
@@ -204,11 +295,18 @@ One WebSocket, flat JSON messages.
 **Server → client**
 
 `connected`, `joined_room`, `left_room`, `room_event`, `room_audio`,
-`audio_published`, `webrtc_offer`, `webrtc_answer`, `ice_candidate`, `error`.
+`room_interrupt`, `audio_published`, `webrtc_offer`, `webrtc_answer`,
+`ice_candidate`, `error`.
 
 WebRTC is native in the browser. The server never touches media for a
 browser-to-browser call — it relays SDP and ICE to a single peer and checks
 that both peers are in the same room.
+
+### The agent as a native WebRTC peer
+
+With `pip install nitpick[webrtc]`, `WebRtcTransport` makes the agent a real
+WebRTC endpoint: the browser negotiates with it directly and audio travels
+as Opus over SRTP, with nothing relayed through the signaling socket.
 
 ---
 
@@ -218,19 +316,10 @@ that both peers are in the same room.
 pytest
 ```
 
-The suite covers the two-lane frame ordering, the transcript/turn-close
-guarantee, the turn gate's release timeout, the room event bus, the
-signaling protocol, and a full browser-to-agent turn.
-
----
-
-## Status
-
-Alpha. The pipeline core, rooms, signaling, STT/LLM/TTS services and the
-browser client all work end to end. Not yet built: server-side VAD (turn
-detection currently comes from the browser), barge-in interruption handling,
-per-session billing, and an `aiortc` transport so the agent can be a native
-WebRTC peer rather than relaying PCM over the signaling socket.
+56 tests covering the two-lane frame ordering, the transcript/turn-close
+guarantee, the turn gate's release timeout, the VAD state machine and its
+drain loop, client/server VAD coordination, barge-in, billing, the room
+event bus, the signaling protocol, the SDK, and a full browser-to-agent turn.
 
 ## License
 

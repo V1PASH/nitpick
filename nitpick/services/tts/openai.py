@@ -9,21 +9,23 @@ audio goes straight into the output transport without decoding.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ...frames import (
     DOWNSTREAM,
     AudioChunk,
     Frame,
-    FrameHandler,
     FrameKind,
     FrameProcessor,
     frame_output_audio,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ...billing import BillingCollector
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +67,13 @@ class TTSService(FrameProcessor):
         config: TTSConfig | None = None,
         *,
         name: str = "TTSService",
+        billing: "BillingCollector | None" = None,
     ) -> None:
         super().__init__(name, _TTSHandler(self))
         self.config = config or TTSConfig()
+        self._billing = billing
         self._buffer = ""
+        self._speaking = False
 
     # ------------------------------------------------------------------
     # Synthesis
@@ -99,18 +104,35 @@ class TTSService(FrameProcessor):
         text = text.strip()
         if not text:
             return
+
+        if not self._speaking:
+            self._speaking = True
+            await self.push_frame(Frame(FrameKind.BOT_STARTED_SPEAKING), DOWNSTREAM)
+
         try:
             pcm = await self.synthesize(text)
         except Exception as exc:  # noqa: BLE001 - a TTS failure must not kill the turn
             log.warning("TTS synthesis failed: %s", exc)
             await self.push_error(f"TTS error: {exc}", fatal=False)
             return
+
+        if self._billing is not None:
+            self._billing.record_tts_usage(
+                characters=len(text), model=self.config.model
+            )
+
         chunk = AudioChunk(
             data=pcm,
             sample_rate=self.config.sample_rate,
             num_channels=1,
         )
         await self.push_frame(frame_output_audio(chunk), DOWNSTREAM)
+
+    async def _finish_speaking(self) -> None:
+        if not self._speaking:
+            return
+        self._speaking = False
+        await self.push_frame(Frame(FrameKind.BOT_STOPPED_SPEAKING), DOWNSTREAM)
 
 
 class _TTSHandler:
@@ -139,11 +161,13 @@ class _TTSHandler:
             service._buffer = ""
             if remaining:
                 await service._emit_audio(remaining)
+            await service._finish_speaking()
             await processor.push_frame(frame, direction)
             return
 
         if kind is FrameKind.INTERRUPTION:
             service._buffer = ""
+            await service._finish_speaking()
             await processor.push_frame(frame, direction)
             return
 

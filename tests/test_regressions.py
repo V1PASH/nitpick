@@ -11,17 +11,16 @@ import pytest
 
 from nitpick.frames import (
     DOWNSTREAM,
+    AudioChunk,
     Frame,
     FrameKind,
     FrameProcessor,
-    Transcription,
+    frame_input_audio,
     frame_llm_text,
-    frame_vad_stopped,
 )
 from nitpick.pipeline import PipelineParams, PipelineTask
 from nitpick.processors.assistant_aggregator import AssistantAggregator
 from nitpick.rooms import RoomManager
-from nitpick.rooms.model import ParticipantRole
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +199,13 @@ async def test_transport_receives_audio_that_arrives_before_the_pipeline_starts(
     manager.join_room(participant, "demo")
 
     transport = RoomTransport(manager, participant, params=TransportParams())
-    received: list[bytes] = []
 
     browser = manager.register_participant(None, "browser")
     manager.join_room(browser, "demo")
+
+    # The downstream processor holds the frame until the pipeline boots.
+    downstream = FrameProcessor("downstream")
+    transport.input().link(downstream)
 
     # Audio arrives before the pipeline is started.
     manager.emit_participant_audio(
@@ -211,6 +213,95 @@ async def test_transport_receives_audio_that_arrives_before_the_pipeline_starts(
     )
     await asyncio.sleep(0.05)
 
-    # The transport queued it as an input frame; the processor is not started
-    # yet, so the frame is held rather than dropped.
-    assert transport.input()._input_q.qsize() == 1
+    assert downstream._input_q.qsize() == 1, (
+        "the frame must be held by the downstream processor, not dropped"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A processor must not re-queue a frame into its own input queue.
+#
+# ``push_frame`` used to check "have I started?" and, if not, put the frame
+# back into this processor's own input queue. The input loop then picked it
+# up, called the handler, the handler pushed the frame again, and the two
+# spun forever — a hang, not a dropped frame.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pushing_before_start_does_not_loop_forever():
+    processor = FrameProcessor("solo")
+    await processor.setup()
+
+    pushed: list[Frame] = []
+
+    class Handler:
+        async def on_process_frame(self, processor, frame, direction):
+            pushed.append(frame)
+            # Pushing again is what used to spin.
+            await processor.push_frame(frame, direction)
+
+    processor._handler = Handler()
+
+    await asyncio.wait_for(
+        processor.push_frame(Frame(FrameKind.DATA, b"x"), DOWNSTREAM),
+        timeout=2.0,
+    )
+    await asyncio.sleep(0.05)
+
+    # The processor has no neighbour, so the frame goes nowhere — but it
+    # must not spin.
+    assert pushed == []
+
+
+# ---------------------------------------------------------------------------
+# The VAD processor must not confuse the framework's lifecycle flag with its
+# own "the user is speaking" flag.
+#
+# Both were called ``_started``. The framework sets its flag when the
+# START frame arrives, so the VAD's check ``not self._started`` was always
+# False after boot and the VAD never emitted a turn boundary.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vad_emits_turn_boundaries():
+    import numpy as np
+
+    from nitpick.vad import EnergyVad, VadParams, VadProcessor
+
+    def pcm(samples: int, amplitude: int) -> bytes:
+        t = np.arange(samples) / 16_000.0
+        wave = (np.sin(2 * np.pi * 220.0 * t) * amplitude).astype("<i2")
+        return wave.tobytes()
+
+    vad = VadProcessor(
+        EnergyVad(16_000),
+        params=VadParams(confidence=0.5, start_secs=0.1, stop_secs=0.1),
+    )
+    seen: list[FrameKind] = []
+
+    class Capture:
+        async def on_process_frame(self, processor, frame, direction):
+            seen.append(frame.kind)
+            await processor.push_frame(frame, direction)
+
+    task = PipelineTask([vad, FrameProcessor("capture", Capture())], PipelineParams())
+    task.start()
+    await asyncio.sleep(0.05)
+
+    await task.push_frame(
+        frame_input_audio(AudioChunk(data=pcm(16_000, 6000), sample_rate=16_000)),
+        DOWNSTREAM,
+    )
+    await asyncio.sleep(0.1)
+    await task.push_frame(
+        frame_input_audio(AudioChunk(data=pcm(16_000, 0), sample_rate=16_000)),
+        DOWNSTREAM,
+    )
+    await asyncio.sleep(0.2)
+
+    assert FrameKind.VAD_USER_STARTED_SPEAKING in seen
+    assert FrameKind.VAD_USER_STOPPED_SPEAKING in seen
+
+    await task.cancel()

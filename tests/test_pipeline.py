@@ -12,10 +12,7 @@ from nitpick.frames import (
     FrameKind,
     FrameProcessor,
     Transcription,
-    frame_input_audio,
-    frame_start,
     frame_transcription,
-    frame_vad_stopped,
 )
 from nitpick.pipeline import PipelineParams, PipelineTask
 

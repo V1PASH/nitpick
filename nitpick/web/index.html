@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>nitpick — voice agent</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0d1117; color: #e6edf3;
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  .card { width: min(760px, 94vw); background: #161b22; border: 1px solid #30363d;
+          border-radius: 14px; padding: 28px 30px; }
+  h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 22px; color: #8b949e; font-size: 14px; }
+  label { display: block; font-size: 12px; text-transform: uppercase;
+          letter-spacing: .07em; color: #8b949e; margin-bottom: 6px; }
+  input { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid #30363d;
+          background: #0d1117; color: #e6edf3; font: inherit; }
+  .row { display: flex; gap: 12px; margin-bottom: 18px; }
+  .row > div { flex: 1; }
+  button {
+    padding: 10px 20px; border-radius: 8px; border: 1px solid #30363d; background: #21262d;
+    color: #e6edf3; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #30363d; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: #238636; border-color: #2ea043; }
+  button.primary:hover:not(:disabled) { background: #2ea043; }
+  .status { display: flex; align-items: center; gap: 9px; margin: 18px 0 0;
+            font-size: 14px; color: #8b949e; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #484f58; }
+  .dot.on { background: #3fb950; box-shadow: 0 0 0 3px rgba(63,185,80,.18); }
+  .dot.err { background: #f85149; box-shadow: 0 0 0 3px rgba(248,81,73,.18); }
+  .transcript { margin-top: 20px; border-top: 1px solid #21262d; padding-top: 18px;
+                max-height: 320px; overflow-y: auto; }
+  .line { margin-bottom: 11px; font-size: 14.5px; }
+  .who { font-weight: 600; font-size: 12px; text-transform: uppercase;
+         letter-spacing: .06em; margin-right: 7px; }
+  .who.user { color: #58a6ff; }
+  .who.agent { color: #d2a8ff; }
+  .line.interim { opacity: .55; font-style: italic; }
+  .hint { margin-top: 18px; font-size: 12.5px; color: #6e7681; }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>nitpick</h1>
+  <p class="sub">Talk to a voice agent running on your machine.</p>
+
+  <div class="row">
+    <div>
+      <label for="room">Room</label>
+      <input id="room" value="demo" autocomplete="off" />
+    </div>
+    <div>
+      <label for="name">Your name</label>
+      <input id="name" value="User" autocomplete="off" />
+    </div>
+  </div>
+
+  <button id="connect" class="primary">Connect &amp; talk</button>
+  <button id="stop" disabled>Disconnect</button>
+
+  <div class="status"><span class="dot" id="dot"></span><span id="status">Not connected</span></div>
+
+  <div class="transcript" id="transcript"></div>
+
+  <p class="hint">
+    Your browser sends 16 kHz mono PCM to the agent over the WebSocket and plays the
+    agent's reply. Browser-to-browser peers use native WebRTC — the server only
+    relays SDP and ICE.
+  </p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const TARGET_RATE = 16000;   // what the agent's STT expects
+  const FRAME_MS = 20;         // how much audio per websocket message
+  const SILENCE_RMS = 0.015;   // speaking threshold
+  const SILENCE_HOLD_MS = 700; // how long quiet must last to call it "stopped"
+
+  const els = {
+    room: document.getElementById("room"),
+    name: document.getElementById("name"),
+    connect: document.getElementById("connect"),
+    stop: document.getElementById("stop"),
+    dot: document.getElementById("dot"),
+    status: document.getElementById("status"),
+    transcript: document.getElementById("transcript"),
+  };
+
+  let ws = null;
+  let selfId = null;
+  let stream = null;
+  let audioCtx = null;
+  let workletNode = null;
+  let sourceNode = null;
+  let playbackCtx = null;
+  let pendingSamples = [];
+  let speaking = false;
+  let silenceSince = 0;
+  let lastSend = 0;
+  const peers = new Map();   // participant_id -> RTCPeerConnection
+  const queuedIce = new Map();
+
+  // ------------------------------------------------------------------ utils
+
+  function setStatus(text, state) {
+    els.status.textContent = text;
+    els.dot.className = "dot" + (state ? " " + state : "");
+  }
+
+  function addLine(who, text, interim) {
+    if (!text) return;
+    const div = document.createElement("div");
+    div.className = "line" + (interim ? " interim" : "");
+    const label = document.createElement("span");
+    label.className = "who " + who;
+    label.textContent = who === "user" ? "You" : "Agent";
+    div.appendChild(label);
+    div.appendChild(document.createTextNode(text));
+    els.transcript.appendChild(div);
+    els.transcript.scrollTop = els.transcript.scrollHeight;
+  }
+
+  function bytesToBase64(bytes) {
+    let out = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(out);
+  }
+
+  function floatToPcm16(samples) {
+    const out = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      let s = Math.max(-1, Math.min(1, samples[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return new Uint8Array(out.buffer);
+  }
+
+  // Linear resample — adequate for speech, and dependency-free.
+  function resample(input, fromRate, toRate) {
+    if (fromRate === toRate) return input;
+    const ratio = fromRate / toRate;
+    const outLength = Math.floor(input.length / ratio);
+    const out = new Float32Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const pos = i * ratio;
+      const idx = Math.floor(pos);
+      const frac = pos - idx;
+      const a = input[idx] || 0;
+      const b = input[idx + 1] || 0;
+      out[i] = a + (b - a) * frac;
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------- websocket
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+      send({ type: "join_room", room_id: els.room.value, name: els.name.value });
+      setStatus("Connected — starting microphone…", "on");
+    };
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch (_) { return; }
+      handleMessage(msg);
+    };
+    ws.onclose = () => {
+      setStatus("Disconnected", "");
+      els.connect.disabled = false;
+      els.stop.disabled = true;
+      teardownMedia();
+    };
+    ws.onerror = () => setStatus("Connection error", "err");
+  }
+
+  function send(payload) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(payload));
+    }
+  }
+
+  // ------------------------------------------------------------- messages
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case "connected":
+        selfId = msg.participant_id;
+        startMicrophone();
+        break;
+
+      case "joined_room":
+        setStatus(`In room "${msg.room.room_id}" — speak now`, "on");
+        break;
+
+      case "room_event":
+        handleRoomEvent(msg.event);
+        break;
+
+      case "room_audio":
+        playAgentAudio(msg.audio_base64);
+        break;
+
+      case "webrtc_offer":
+        handleOffer(msg);
+        break;
+
+      case "webrtc_answer":
+        handleAnswer(msg);
+        break;
+
+      case "ice_candidate":
+        handleRemoteIce(msg);
+        break;
+
+      case "error":
+        setStatus(`${msg.code}: ${msg.message}`, "err");
+        break;
+    }
+  }
+
+  function handleRoomEvent(event) {
+    if (!event) return;
+    if (event.event_type === "participant_transcript") {
+      const who = event.participant_role === "agent" ? "agent" : "user";
+      addLine(who, event.transcript_text, !event.transcript_is_final);
+    } else if (event.event_type === "participant_joined") {
+      if (event.participant_role === "local" && event.participant_id !== selfId) {
+        makeOffer(event.participant_id);
+      }
+    } else if (event.event_type === "participant_left") {
+      const pc = peers.get(event.participant_id);
+      if (pc) { pc.close(); peers.delete(event.participant_id); }
+    }
+  }
+
+  // ------------------------------------------------------------------ mic
+
+  async function startMicrophone() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+    } catch (err) {
+      setStatus("Microphone denied: " + err.message, "err");
+      return;
+    }
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const workletCode = `
+      class PcmCapture extends AudioWorkletProcessor {
+        constructor() { super(); this._buf = []; }
+        process(inputs) {
+          const ch = inputs[0] && inputs[0][0];
+          if (ch) { this._buf.push(new Float32Array(ch)); this.port.postMessage(ch); }
+          return true;
+        }
+      }
+      registerProcessor('pcm-capture', PcmCapture);
+    `;
+    const blob = new Blob([workletCode], { type: "application/javascript" });
+    await audioCtx.audioWorklet.addModule(URL.createObjectURL(blob));
+
+    sourceNode = audioCtx.createMediaStreamSource(stream);
+    workletNode = new AudioWorkletNode(audioCtx, "pcm-capture");
+    workletNode.port.onmessage = (event) => onAudioChunk(event.data);
+    sourceNode.connect(workletNode);
+    // Keep the graph alive without echoing to the speakers.
+    const sink = audioCtx.createGain();
+    sink.gain.value = 0;
+    sourceNode.connect(sink).connect(audioCtx.destination);
+
+    setStatus("Listening — speak now", "on");
+  }
+
+  function onAudioChunk(chunk) {
+    if (!chunk || !audioCtx) return;
+    const now = performance.now();
+
+    // Speaking detection on the raw signal.
+    let rms = 0;
+    for (let i = 0; i < chunk.length; i++) rms += chunk[i] * chunk[i];
+    rms = Math.sqrt(rms / chunk.length);
+
+    if (rms > SILENCE_RMS) {
+      if (!speaking) {
+        speaking = true;
+        send({ type: "participant_activity", activity: "speaking_started" });
+      }
+      silenceSince = 0;
+    } else if (speaking) {
+      if (!silenceSince) silenceSince = now;
+      else if (now - silenceSince > SILENCE_HOLD_MS) {
+        speaking = false;
+        silenceSince = 0;
+        send({ type: "participant_activity", activity: "speaking_stopped" });
+      }
+    }
+
+    // Accumulate and send fixed-size frames.
+    pendingSamples.push(chunk);
+    const frameSamples = Math.round((audioCtx.sampleRate * FRAME_MS) / 1000);
+    let total = 0;
+    for (const part of pendingSamples) total += part.length;
+
+    if (total >= frameSamples && now - lastSend >= FRAME_MS) {
+      lastSend = now;
+      const merged = new Float32Array(total);
+      let offset = 0;
+      for (const part of pendingSamples) { merged.set(part, offset); offset += part.length; }
+      pendingSamples = [];
+
+      const resampled = resample(merged, audioCtx.sampleRate, TARGET_RATE);
+      const pcm = floatToPcm16(resampled);
+      send({
+        type: "audio_pcm",
+        audio_base64: bytesToBase64(pcm),
+        sample_rate: TARGET_RATE,
+        channels: 1,
+      });
+    }
+  }
+
+  // ------------------------------------------------------------- playback
+
+  function playAgentAudio(b64) {
+    if (!b64) return;
+    if (!playbackCtx) playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (playbackCtx.state === "suspended") playbackCtx.resume();
+
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const view = new DataView(bytes.buffer);
+    const samples = new Float32Array(bytes.length / 2);
+    for (let i = 0; i < samples.length; i++) {
+      samples[i] = view.getInt16(i * 2, true) / 32768;
+    }
+
+    const buffer = playbackCtx.createBuffer(1, samples.length, 24000);
+    buffer.copyToChannel(samples, 0);
+    const source = playbackCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(playbackCtx.destination);
+    source.start();
+  }
+
+  // --------------------------------------------------------------- WebRTC
+
+  function newPeer(peerId) {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    if (stream) {
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+    }
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        send({
+          type: "ice_candidate",
+          target_participant_id: peerId,
+          candidate: event.candidate.toJSON(),
+        });
+      }
+    };
+    pc.ontrack = (event) => {
+      const audio = document.createElement("audio");
+      audio.autoplay = true;
+      audio.srcObject = event.streams[0];
+      document.body.appendChild(audio);
+    };
+    peers.set(peerId, pc);
+    return pc;
+  }
+
+  async function makeOffer(peerId) {
+    const pc = newPeer(peerId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send({ type: "webrtc_offer", target_participant_id: peerId, sdp: pc.localDescription });
+  }
+
+  async function handleOffer(msg) {
+    const peerId = msg.from_participant_id;
+    const pc = peers.get(peerId) || newPeer(peerId);
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    send({ type: "webrtc_answer", target_participant_id: peerId, sdp: pc.localDescription });
+    flushQueuedIce(peerId, pc);
+  }
+
+  async function handleAnswer(msg) {
+    const peerId = msg.from_participant_id;
+    const pc = peers.get(peerId);
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    flushQueuedIce(peerId, pc);
+  }
+
+  async function handleRemoteIce(msg) {
+    const peerId = msg.from_participant_id;
+    const pc = peers.get(peerId);
+    if (!pc || !pc.remoteDescription) {
+      if (!queuedIce.has(peerId)) queuedIce.set(peerId, []);
+      queuedIce.get(peerId).push(msg.candidate);
+      return;
+    }
+    await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+  }
+
+  async function flushQueuedIce(peerId, pc) {
+    const queued = queuedIce.get(peerId) || [];
+    for (const candidate of queued) {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+    queuedIce.delete(peerId);
+  }
+
+  // -------------------------------------------------------------- teardown
+
+  function teardownMedia() {
+    if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+    if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+    for (const pc of peers.values()) pc.close();
+    peers.clear();
+    pendingSamples = [];
+    speaking = false;
+  }
+
+  els.connect.addEventListener("click", () => {
+    els.connect.disabled = true;
+    els.stop.disabled = false;
+    connect();
+  });
+
+  els.stop.addEventListener("click", () => {
+    send({ type: "leave_room" });
+    teardownMedia();
+    if (ws) ws.close();
+  });
+})();
+</script>
+</body>
+</html>

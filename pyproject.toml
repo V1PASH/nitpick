@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nitpick"
+version = "0.1.0"
+description = "A Python framework for building voice agents — frame pipelines, STT/LLM/TTS services, and WebRTC rooms."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-2-Clause" }
+authors = [{ name = "Arsh0922" }]
+keywords = ["voice", "ai", "agent", "webrtc", "stt", "tts", "llm", "pipeline"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12",
+    "httpx>=0.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+whisper = ["faster-whisper>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/V1PASH/nitpick"
+Repository = "https://github.com/V1PASH/nitpick"
+Issues = "https://github.com/V1PASH/nitpick/issues"
+
+[project.scripts]
+nitpick = "nitpick.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nitpick*"]
+
+[tool.setuptools.package-data]
+"nitpick.web" = ["index.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

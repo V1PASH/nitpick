@@ -142,8 +142,12 @@ def test_webrtc_vad_rejects_an_unsupported_sample_rate():
 
 def test_webrtc_vad_needs_no_pkg_resources():
     """Importing nitpick's backend must not pull in pkg_resources."""
+    import importlib.util
     import subprocess
     import sys
+
+    if importlib.util.find_spec("_webrtcvad") is None:
+        pytest.skip("the webrtcvad C extension is not installed")
 
     code = (
         "import sys;"

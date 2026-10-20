@@ -142,6 +142,84 @@ async def test_pcm_audio_reaches_in_process_listeners():
 
 
 @pytest.mark.asyncio
+async def test_joining_a_full_room_reports_room_full():
+    """A full room must say so, not claim the room does not exist."""
+    server = SignalingServer()
+    server.control.create_room("demo", max_participants=1)
+
+    first = FakeWebSocket()
+    await server.handle_message(first, {"type": "join_room", "room_id": "demo"})
+
+    second = FakeWebSocket()
+    response = await server.handle_message(
+        second, {"type": "join_room", "room_id": "demo"}
+    )
+
+    assert response["type"] == "error"
+    assert response["code"] == "room_full"
+
+
+def test_joining_does_not_change_an_existing_rooms_capacity():
+    """A client must not be able to resize a room by joining it."""
+    manager = RoomManager()
+    control = RoomControlModule(manager)
+    control.create_room("demo", max_participants=2)
+
+    participant = manager.register_participant(None, "a")
+    control.join_participant(participant, room_name="demo")
+
+    # A second joiner asks for a much larger room.
+    other = manager.register_participant(None, "b")
+    control.join_participant(other, room_name="demo", max_participants=50)
+
+    room = manager.get_room("demo")
+    assert room is not None
+    assert room.max_participants == 2, "the room's capacity must be unchanged"
+    assert room.participant_count == 2
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_capacity_is_reported_precisely():
+    server = SignalingServer()
+    ws = FakeWebSocket()
+
+    response = await server.handle_message(
+        ws,
+        {"type": "join_room", "room_id": "demo", "max_participants": "not-a-number"},
+    )
+
+    assert response["type"] == "error"
+    assert response["code"] == "invalid_max_participants"
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_room_id_is_rejected():
+    server = SignalingServer()
+    ws = FakeWebSocket()
+
+    response = await server.handle_message(
+        ws, {"type": "join_room", "room_id": "x" * 200}
+    )
+
+    assert response["type"] == "error"
+    assert response["code"] == "invalid_room_id"
+
+
+@pytest.mark.asyncio
+async def test_stt_audio_chunk_is_not_a_supported_type():
+    """The batch chunk path is not implemented — it must say so clearly."""
+    server = SignalingServer()
+    ws = FakeWebSocket()
+
+    response = await server.handle_message(
+        ws, {"type": "stt_audio_chunk", "audio_base64": "AAAA"}
+    )
+
+    assert response["type"] == "error"
+    assert response["code"] == "unsupported_type"
+
+
+@pytest.mark.asyncio
 async def test_webrtc_relay_targets_one_peer_only():
     server = SignalingServer()
     sender_ws = FakeWebSocket()

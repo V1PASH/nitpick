@@ -70,6 +70,11 @@ class RoomControlModule:
         return self._manager
 
     @property
+    def max_room_name_length(self) -> int:
+        """The longest a room id may be."""
+        return self._max_room_name_length
+
+    @property
     def max_participants_limit(self) -> int:
         return self._max_participants_limit
 
@@ -146,8 +151,9 @@ class RoomControlModule:
                 room_id, max_participants=capacity, created_by=participant.participant_id
             )
             created = True
-        elif room.max_participants != capacity:
-            room.max_participants = capacity
+        # An existing room keeps its own capacity. A client must not be
+        # able to raise the limit — or lower it below the current
+        # occupancy — just by joining. Use update_room_capacity() for that.
 
         self._manager.join_room(participant, room_id)
         return room, created

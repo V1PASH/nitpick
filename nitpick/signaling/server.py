@@ -44,7 +44,8 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from ..rooms import RoomControlModule, RoomManager
+from ..rooms import RoomControlError, RoomControlModule, RoomManager
+from ..rooms.model import RoomFullError
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +163,20 @@ class SignalingServer:
         room_id = payload.get("room_id")
         if not isinstance(room_id, str) or not room_id.strip():
             raise ProtocolError("invalid_room_id", "room_id is required")
+        if len(room_id) > self.control.max_room_name_length:
+            raise ProtocolError(
+                "invalid_room_id",
+                f"room_id must be at most {self.control.max_room_name_length} characters",
+            )
+
+        # Validate the requested capacity up front so the error code is
+        # precise, rather than surfacing as a generic join failure.
+        requested_capacity = payload.get("max_participants")
+        if requested_capacity is not None:
+            try:
+                self.control.validate_max_participants(requested_capacity)
+            except RoomControlError as exc:
+                raise ProtocolError("invalid_max_participants", str(exc)) from exc
 
         participant = self.manager.get_participant_by_websocket(websocket)
         if participant is None:
@@ -174,9 +189,12 @@ class SignalingServer:
             room, created = self.control.join_participant(
                 participant,
                 room_name=room_id,
-                max_participants=payload.get("max_participants"),
+                max_participants=requested_capacity,
                 create_if_missing=create_if_missing,
             )
+        except RoomFullError as exc:
+            self.manager.unregister_participant_by_id(participant.participant_id)
+            raise ProtocolError("room_full", str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 - mapped to a protocol error
             self.manager.unregister_participant_by_id(participant.participant_id)
             raise ProtocolError("room_not_found", str(exc)) from exc

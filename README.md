@@ -132,6 +132,16 @@ async with RoomClient("ws://localhost:8000/ws", name="My App") as client:
 
 ---
 
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | How the framework works — frames, the two-lane processor, the pipeline, turn detection, interruption, and the design trade-offs |
+| [docs/sdk.md](docs/sdk.md) | The client SDK and the signaling protocol — every message type, every error code, and how to write your own client |
+| [docs/README.md](docs/README.md) | Reading guide and the three things worth knowing |
+
+---
+
 ## Architecture
 
 ```
@@ -288,7 +298,6 @@ One WebSocket, flat JSON messages.
 | `participant_activity` | `speaking_started` / `speaking_stopped` — turn boundaries |
 | `audio_pcm` | **Raw PCM frames** — the streaming path to the agent |
 | `stt_transcript` | A transcript from the browser's speech recogniser |
-| `stt_audio_chunk` | A batch WebM/Opus chunk for server-side STT |
 | `publish_audio` | Base64 audio fanned out to the room |
 | `webrtc_offer` / `webrtc_answer` / `ice_candidate` | SDP and ICE relay |
 

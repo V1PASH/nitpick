@@ -123,6 +123,9 @@ class AgentConfig:
     stt: str = "openai"
     llm: str = "openai:gpt-4o-mini"
     tts: str = "openai:alloy"
+    #: The base URL of the LLM endpoint, for OpenAI-compatible servers
+    #: (a self-hosted model, or a gateway).
+    llm_base_url: str | None = None
     language: str | None = None
     input_sample_rate: int = 16_000
     output_sample_rate: int = 24_000
@@ -163,6 +166,7 @@ class Agent:
         stt: str = "openai",
         llm: str = "openai:gpt-4o-mini",
         tts: str = "openai:alloy",
+        llm_base_url: str | None = None,
         language: str | None = None,
         tools: list[ToolDefinition] | None = None,
         input_sample_rate: int = 16_000,
@@ -175,6 +179,7 @@ class Agent:
         llm_service: LLMService | None = None,
         tts_service: TTSService | None = None,
         vad_backend: object | None = None,
+        manager: RoomManager | None = None,
     ) -> None:
         self.config = AgentConfig(
             name=name,
@@ -182,6 +187,7 @@ class Agent:
             stt=stt,
             llm=llm,
             tts=tts,
+            llm_base_url=llm_base_url,
             language=language,
             input_sample_rate=input_sample_rate,
             output_sample_rate=output_sample_rate,
@@ -191,7 +197,9 @@ class Agent:
         )
         self.tools = list(tools or [])
         self.context = LLMContext(self.config.prompt)
-        self.manager = RoomManager()
+        # A shared manager lets one server host many agents, each in its
+        # own room. When None the agent owns its manager and serves it.
+        self.manager = manager if manager is not None else RoomManager()
         self.control = RoomControlModule(self.manager)
         self.session_id = session_id or f"s-{uuid.uuid4().hex[:12]}"
 
@@ -311,6 +319,8 @@ class Agent:
         if provider_name != "openai":
             raise ValueError(f"Unknown LLM provider {provider_name!r}. Use 'openai'.")
         config = LLMConfig(model=model or "gpt-4o-mini")
+        if self.config.llm_base_url:
+            config.base_url = self.config.llm_base_url
         service = LLMService(self.context, config, billing=self.billing)
         for definition in self.tools:
             service.add_tool(definition.to_tool())

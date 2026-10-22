@@ -81,23 +81,22 @@ def check_versions_match() -> str:
 
 
 def already_published(name: str, version: str) -> bool:
-    """Is this version already on PyPI?"""
-    import urllib.error
-    import urllib.request
+    """Is this version already on PyPI?
 
+    ``httpx`` is used rather than ``urllib`` because it bundles its own CA
+    bundle. ``urllib`` relies on the system trust store, which on some
+    machines cannot verify PyPI's certificate — which would quietly turn
+    this check into a no-op.
+    """
     url = f"https://pypi.org/pypi/{name}/{version}/json"
+
     try:
-        with urllib.request.urlopen(url, timeout=15) as response:
-            return response.status == 200
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return False
-        # A network problem must not stop a publish; PyPI will have the
-        # final say anyway.
+        import httpx
+
+        response = httpx.get(url, timeout=15, follow_redirects=True)
+        return response.status_code == 200
+    except Exception as error:  # noqa: BLE001 - never block a publish on this
         print(f"  · could not check PyPI ({error}) — continuing")
-        return False
-    except Exception as error:  # noqa: BLE001
-        print(f"  · could not reach PyPI ({error}) — continuing")
         return False
 
 
@@ -108,7 +107,6 @@ def check_not_published(name: str, version: str) -> None:
             "publishing again"
         )
     print(f"  · {name} {version} is not on PyPI yet")
-
 
 def check_dist() -> None:
     artefacts = sorted(

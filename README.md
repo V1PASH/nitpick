@@ -67,6 +67,19 @@ class VadStopped:
 ## Install
 
 ```bash
+pip install nitpick-voice
+```
+
+The distribution is called **nitpick-voice** because `nitpick` is taken on
+PyPI by an unrelated package. **The import name is still `nitpick`**:
+
+```python
+from nitpick import Agent, RoomClient, tool
+```
+
+To work on the framework itself:
+
+```bash
 git clone https://github.com/V1PASH/nitpick.git
 cd nitpick
 python3 -m venv .venv && source .venv/bin/activate
@@ -88,10 +101,10 @@ export SARVAM_API_KEY=...         # optional: Sarvam STT (Indian languages)
 
 | Extra | Adds | Why |
 |---|---|---|
-| `pip install nitpick[onnx]` | Silero VAD | A neural VAD that handles noisy rooms |
-| `pip install nitpick[webrtcvad]` | WebRTC VAD | Google's model; needs a C compiler to build |
-| `pip install nitpick[webrtc]` | `aiortc` | The agent as a native WebRTC peer |
-| `pip install nitpick[all]` | all of the above | |
+| `pip install nitpick-voice[onnx]` | Silero VAD | A neural VAD that handles noisy rooms |
+| `pip install nitpick-voice[webrtcvad]` | WebRTC VAD | Google's model; needs a C compiler to build |
+| `pip install nitpick-voice[webrtc]` | `aiortc` | The agent as a native WebRTC peer |
+| `pip install nitpick-voice[all]` | all of the above | |
 
 The default VAD backend is `energy` — pure Python, no dependencies, no model
 file. It works straight after `pip install`.
@@ -313,7 +326,7 @@ that both peers are in the same room.
 
 ### The agent as a native WebRTC peer
 
-With `pip install nitpick[webrtc]`, `WebRtcTransport` makes the agent a real
+With `pip install nitpick-voice[webrtc]`, `WebRtcTransport` makes the agent a real
 WebRTC endpoint: the browser negotiates with it directly and audio travels
 as Opus over SRTP, with nothing relayed through the signaling socket.
 

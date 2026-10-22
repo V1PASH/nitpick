@@ -589,7 +589,7 @@ native WebRTC and never touch the server's media path. The server relays
 SDP and ICE and nothing else.
 
 **`energy` is the default VAD.** It has no dependencies and no model file,
-so `pip install nitpick` always produces a working agent. `silero` is one
+so `pip install nitpick-voice` always produces a working agent. `silero` is one
 extra away for noisy environments.
 
 ---

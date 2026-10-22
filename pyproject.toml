@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nitpick"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python framework for building voice agents — frame pipelines, STT/LLM/TTS services, and WebRTC rooms."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "BSD-2-Clause" }
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
 authors = [{ name = "Arsh0922" }]
 keywords = ["voice", "ai", "agent", "webrtc", "stt", "tts", "llm", "pipeline"]
 classifiers = [

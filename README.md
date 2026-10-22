@@ -155,6 +155,45 @@ async with RoomClient("ws://localhost:8000/ws", name="My App") as client:
 
 ---
 
+## Publishing
+
+The package is built and published with [go-task](https://taskfile.dev):
+
+```bash
+task                 # list the tasks
+task test            # run the tests
+task build           # build the wheel and the sdist
+task check           # the pre-publish checks on their own
+task publish         # build, check and upload to PyPI
+task publish-test    # upload to TestPyPI instead
+task release         # tag the current version and push the tag
+```
+
+`task publish` refuses to run unless the working tree is clean, the version
+in `pyproject.toml` matches the package's `__version__`, the version is not
+already on PyPI, and the artefacts pass `twine check --strict`. Publishing is
+the one thing you cannot undo, so the checks are strict.
+
+The token comes from `~/.pypirc`:
+
+```ini
+[distutils]
+index-servers =
+    pypi
+
+[pypi]
+username = V1PASH
+password = pypi-...
+```
+
+There is also a `publish` GitHub workflow that uses PyPI's **trusted
+publishing** — the workflow is authorised by GitHub, so a release can be
+published from CI with no API token stored anywhere. Add the workflow as a
+pending publisher on the project's PyPI page, and create a `pypi` environment
+in the repository.
+
+---
+
 ## Architecture
 
 ```

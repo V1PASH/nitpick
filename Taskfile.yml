@@ -48,6 +48,8 @@ tasks:
 
   build:
     desc: Build the wheel and the sdist
+    # Always rebuild: a stale artefact is worse than a slow build.
+    run: always
     cmds:
       - rm -rf dist build
       - "{{.PYTHON}} -m build"

@@ -30,7 +30,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "pytest-timeout>=2.3"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-timeout>=2.3",
+    "build>=1.2",
+    "twine>=6.0",
+    "pyflakes>=3.0",
+]
 # Server-side VAD. The webrtcvad extra needs a C compiler to build; the
 # Silero backend needs onnxruntime. Both are optional — the default
 # 'energy' backend has no dependencies, and without any of them the

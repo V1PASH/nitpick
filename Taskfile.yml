@@ -1,0 +1,94 @@
+# nitpick-voice — build, test and publish.
+#
+#   task              list the tasks
+#   task test         run the test suite
+#   task build        build the wheel and the sdist
+#   task publish      build, check and upload to PyPI
+#   task publish-test upload to TestPyPI instead
+#   task check        the pre-publish checks on their own
+#   task clean        remove the build artefacts
+#
+# `publish` refuses to run on a dirty working tree, on a version that
+# disagrees with the package, or on a version that is already published.
+
+version: "3"
+
+vars:
+  # The quotes matter: the path can contain a space, and go-task does not
+  # quote variable expansions for you.
+  PYTHON: '"{{.ROOT_DIR}}/.venv/bin/python"'
+  PACKAGE: nitpick-voice
+
+tasks:
+  default:
+    desc: List the available tasks
+    cmds:
+      - task --list
+
+  install:
+    desc: Install the package and its development extras
+    cmds:
+      - "{{.PYTHON}} -m pip install -e '.[dev]'"
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - "{{.PYTHON}} -m pytest -q"
+
+  lint:
+    desc: Check for unused imports and undefined names
+    cmds:
+      - "{{.PYTHON}} -m pyflakes nitpick tests"
+
+  clean:
+    desc: Remove the build artefacts
+    cmds:
+      - rm -rf dist build
+      - find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+  build:
+    desc: Build the wheel and the sdist
+    cmds:
+      - rm -rf dist build
+      - "{{.PYTHON}} -m build"
+      - "{{.PYTHON}} -m twine check --strict dist/*"
+    sources:
+      - pyproject.toml
+      - README.md
+      - LICENSE
+      - nitpick/**
+    generates:
+      - dist/*.whl
+      - dist/*.tar.gz
+
+  check:
+    desc: Run the pre-publish checks
+    cmds:
+      - "{{.PYTHON}} scripts/prepublish.py"
+
+  publish:
+    desc: Build, check and upload the package to PyPI
+    deps: [build]
+    cmds:
+      - "{{.PYTHON}} scripts/prepublish.py"
+      - echo "uploading {{.PACKAGE}} to PyPI..."
+      - "{{.PYTHON}} -m twine upload --skip-existing dist/*"
+    interactive: true
+
+  publish-test:
+    desc: Build, check and upload the package to TestPyPI
+    deps: [build]
+    cmds:
+      - "{{.PYTHON}} scripts/prepublish.py --skip-published-check"
+      - echo "uploading {{.PACKAGE}} to TestPyPI..."
+      - "{{.PYTHON}} -m twine upload --skip-existing --repository testpypi dist/*"
+    interactive: true
+
+  release:
+    desc: Tag the current version and push the tag
+    cmds:
+      - |
+        VERSION=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+        echo "tagging v$VERSION"
+        git tag -a "v$VERSION" -m "v$VERSION"
+        git push origin "v$VERSION"
